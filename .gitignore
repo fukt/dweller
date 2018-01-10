@@ -12,3 +12,11 @@
 
 # Project-local glide cache, RE: https://github.com/Masterminds/glide/issues/736
 .glide/
+vendor/
+bin/
+
+# IDEA gitignore
+.idea/workspace.xml
+.idea/modules.xml
+.idea/dweller.iml
+.idea/inspectionProfiles/
