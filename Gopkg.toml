@@ -1,0 +1,25 @@
+required = ["k8s.io/gengo/examples/deepcopy-gen"]
+
+[[constraint]]
+  name = "k8s.io/api"
+  version = "kubernetes-1.8.0"
+
+[[constraint]]
+  name = "k8s.io/apimachinery"
+  version = "kubernetes-1.8.0"
+
+[[constraint]]
+  name = "k8s.io/client-go"
+  version = "^5.0.0"
+
+[[constraint]]
+  name = "github.com/sirupsen/logrus"
+  version = "^1.0.4"
+
+[[constraint]]
+    name = "golang.org/x/crypto"
+    branch = "master"
+
+[[constraint]]
+    name = "golang.org/x/net"
+    branch = "master"
