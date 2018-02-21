@@ -1,8 +1,9 @@
-package dweller
+package controller
 
 import (
 	"fmt"
 	"time"
+	"sync"
 
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -13,30 +14,31 @@ import (
 
 	"github.com/fukt/dweller/pkg/client/clientset/versioned"
 	"github.com/fukt/dweller/pkg/client/informers/externalversions"
+	"github.com/fukt/dweller/pkg/log"
 )
 
 const maxRetries = 5
 
 // Controller is a main dweller controller structure.
 type Controller struct {
-	logger    Logger
+	logger    log.Logger
 	clientset kubernetes.Interface
 	queue     workqueue.RateLimitingInterface
 	informer  cache.SharedIndexInformer
 }
 
-// ControllerOption is a function option for dweller controller.
-type ControllerOption func(*Controller)
+// Option is a function option for dweller controller.
+type Option func(*Controller)
 
-// Logger sets specified logger as a default one.
-func WithLogger(lg Logger) ControllerOption {
+// WithLogger sets specified logger as a default one.
+func WithLogger(lg log.Logger) Option {
 	return func(c *Controller) {
 		c.logger = lg
 	}
 }
 
 // New returns newly created dweller controller or nil on error.
-func New(k8sConfig *rest.Config, client kubernetes.Interface, options ...ControllerOption) (*Controller, error) {
+func New(k8sConfig *rest.Config, client kubernetes.Interface, options ...Option) (*Controller, error) {
 	defaultResync := 0 * time.Millisecond
 
 	clientset, err := versioned.NewForConfig(k8sConfig)
@@ -49,7 +51,7 @@ func New(k8sConfig *rest.Config, client kubernetes.Interface, options ...Control
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 
 	result := &Controller{
-		logger:    &dummyLogger{},
+		logger:    &log.Dummy{},
 		clientset: client,
 		informer:  informer,
 		queue:     queue,
@@ -86,11 +88,18 @@ func New(k8sConfig *rest.Config, client kubernetes.Interface, options ...Control
 // Run starts the kubewatch controller
 func (c *Controller) Run(stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
-	defer c.queue.ShutDown()
 
 	c.logger.Infof("starting dweller controller")
 
-	go c.informer.Run(stopCh)
+	wg := sync.WaitGroup{}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		c.informer.Run(stopCh)
+		c.queue.ShutDown()
+	}()
 
 	if !cache.WaitForCacheSync(stopCh, c.HasSynced) {
 		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to populate"))
@@ -100,6 +109,7 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	c.logger.Infof("dweller controller synced and ready")
 
 	wait.Until(c.runWorker, time.Second, stopCh)
+	wg.Wait()
 }
 
 // HasSynced is required for the cache.Controller interface.

@@ -11,12 +11,13 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/fukt/dweller/pkg/apis/dweller"
+	"github.com/fukt/dweller/pkg/controller"
 )
 
 // Specification represents application environment variables configuration.
 type Specification struct {
-	KubernetesConfig string `required:"false" desc:"Absolute path to the kubeconfig file"`
+	// KubeConfig is an absolute path to the kubeconfig file.
+	KubeConfig string `envconfig:"KUBECONFIG" required:"false"`
 }
 
 func main() {
@@ -26,22 +27,35 @@ func main() {
 		panic(err.Error())
 	}
 
-	config := mustConfig(s.KubernetesConfig)
+	config := mustConfig(s.KubeConfig)
 	kubeClient := mustInitKubernetesClient(config)
 
-	c, err := dweller.New(config, kubeClient, dweller.WithLogger(logrus.New()))
+	log := logrus.New()
+
+	c, err := controller.New(config, kubeClient, controller.WithLogger(log))
 	if err != nil {
 		panic(err.Error())
 	}
 
 	stopCh := make(chan struct{})
-	defer close(stopCh)
-	go c.Run(stopCh)
 
+	go func() {
+		waitForSignal()
+
+		log.Infof("Shutting down ...")
+		close(stopCh)
+	}()
+
+	c.Run(stopCh)
+}
+
+func waitForSignal() {
 	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGTERM)
-	signal.Notify(signals, syscall.SIGINT)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+
 	<-signals
+
+	signal.Stop(signals)
 	close(signals)
 }
 

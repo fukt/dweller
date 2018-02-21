@@ -1,25 +1,28 @@
-.PHONY: all
+# glide is required to install dependencies. If make target depends
+# on it and it is not installed, make will be terminated.
+GLIDE := $(shell which glide)
+ifeq ($(GLIDE),)
+    GLIDE = must-install-glide
+endif
 
-all: init dep
+$(GLIDE):
+	@echo "glide is not installed."
+	@echo "See https://github.com/Masterminds/glide#install for installation instructions."
+	@exit 1
 
-init:
-	go get github.com/golang/dep/cmd/dep
+.PHONY: dep
+dep: $(GLIDE)
+	glide install
 
-dep:
-	dep ensure -v
-
-codegen:
-	vendor/k8s.io/code-generator/generate-groups.sh client,informer,lister,deepcopy github.com/fukt/dweller/pkg/client github.com/fukt/dweller/pkg/apis "dweller:v1alpha1"
-
+.PHONY: build
 build:
-	cd cmd/dweller && go build -a -o ${CURDIR}/bin/dweller
+	go build -o ${CURDIR}/bin/dweller ./cmd/dweller
 
-docker:
-	docker build -t fukt/dweller .
+.PHONY: codegen
+codegen:
+	vendor/k8s.io/code-generator/generate-groups.sh client,informer,lister,deepcopy \
+		github.com/fukt/dweller/pkg/client \
+		github.com/fukt/dweller/pkg/apis \
+		"dweller:v1alpha1"
 
-install:
-	cd deploy && helm install --name dweller dweller
-
-purge:
-	helm delete --purge dweller
 
