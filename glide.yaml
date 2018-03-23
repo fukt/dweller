@@ -1,0 +1,32 @@
+package: github.com/fukt/dweller
+import:
+- package: github.com/golang/glog
+- package: github.com/kelseyhightower/envconfig
+  version: ^1.3.0
+- package: github.com/sirupsen/logrus
+  version: ^1.0.4
+- package: k8s.io/apimachinery
+  subpackages:
+  - pkg/api/errors
+  - pkg/apis/meta/v1
+  - pkg/labels
+  - pkg/runtime
+  - pkg/runtime/schema
+  - pkg/runtime/serializer
+  - pkg/types
+  - pkg/util/runtime
+  - pkg/util/wait
+  - pkg/watch
+- package: k8s.io/client-go
+  version: ^5.0.0
+  subpackages:
+  - discovery
+  - discovery/fake
+  - kubernetes
+  - rest
+  - testing
+  - tools/cache
+  - tools/clientcmd
+  - util/flowcontrol
+  - util/workqueue
+- package: k8s.io/code-generator
