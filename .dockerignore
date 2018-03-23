@@ -1,0 +1,6 @@
+bin/
+deploy/
+docs/
+glide.*
+Gopkg.*
+*.md

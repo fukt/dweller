@@ -18,6 +18,10 @@ dep: $(GLIDE)
 build:
 	go build -o ${CURDIR}/bin/dweller ./cmd/dweller
 
+.PHONY: image
+image:
+	docker build -t fukt/dweller .
+
 .PHONY: codegen
 codegen:
 	vendor/k8s.io/code-generator/generate-groups.sh client,informer,lister,deepcopy \
