@@ -10,8 +10,11 @@ $(GLIDE):
 	@echo "See https://github.com/Masterminds/glide#install for installation instructions."
 	@exit 1
 
+.PHONY: all
+all: dep build
+
 .PHONY: dep
-dep: $(GLIDE)
+dep: glide.yaml glide.lock | $(GLIDE)
 	glide install
 
 .PHONY: build

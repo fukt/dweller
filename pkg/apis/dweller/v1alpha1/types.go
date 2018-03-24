@@ -15,7 +15,24 @@ type VaultSecretClaim struct {
 	Spec VaultSecretClaimSpec `json:"spec"`
 }
 
+// VaultSecretClaimSpec is a specification for vault secret claim.
 type VaultSecretClaimSpec struct {
+	Secret SecretTemplate `json:"secret"`
+}
+
+// SecretTemplate is a template for kubernetes secret created by vault secret
+// claim.
+type SecretTemplate struct {
+	Metadata metav1.ObjectMeta `json:"metadata,omitempty"`
+	Data     []DataItem        `json:"data"`
+}
+
+// DataItem describes kubernetes secret data key with value requesting from the
+// vault.
+type DataItem struct {
+	Key        string `json:"key"`
+	VaultPath  string `json:"vaultPath"`
+	VaultField string `json:"vaultField"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

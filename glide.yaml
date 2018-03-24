@@ -30,3 +30,12 @@ import:
   - util/flowcontrol
   - util/workqueue
 - package: k8s.io/code-generator
+- package: github.com/joho/godotenv
+  version: ^1.2.0
+- package: github.com/hashicorp/vault
+  version: ^0.9.6
+  subpackages:
+  - api
+- package: k8s.io/api
+  subpackages:
+  - core/v1
