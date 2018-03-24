@@ -5,34 +5,29 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/kelseyhightower/envconfig"
+	vaultapi "github.com/hashicorp/vault/api"
 	"github.com/sirupsen/logrus"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/fukt/dweller/pkg/controller"
+	"github.com/fukt/dweller/pkg/vault"
 )
 
-// Specification represents application environment variables configuration.
-type Specification struct {
-	// KubeConfig is an absolute path to the kubeconfig file.
-	KubeConfig string `envconfig:"KUBECONFIG" required:"false"`
-}
-
 func main() {
-	var s Specification
-	err := envconfig.Process("", &s)
+	s, err := SpecificationFromEnvironment()
 	if err != nil {
-		panic(err.Error())
+		panic(err)
 	}
 
+	log := logrus.New()
 	config := mustConfig(s.KubeConfig)
 	kubeClient := mustInitKubernetesClient(config)
+	vaultClient := mustInitVaultClient()
+	asm := vault.NewSecretAssembler(vaultClient)
 
-	log := logrus.New()
-
-	c, err := controller.New(config, kubeClient, controller.WithLogger(log))
+	c, err := controller.New(config, kubeClient, asm, controller.WithLogger(log))
 	if err != nil {
 		panic(err.Error())
 	}
@@ -91,4 +86,18 @@ func mustInitKubernetesClient(config *rest.Config) *kubernetes.Clientset {
 		panic("error creating k8s client: " + err.Error())
 	}
 	return kubeClient
+}
+
+func mustInitVaultClient() *vaultapi.Client {
+	cfg := vaultapi.DefaultConfig()
+	if err := cfg.ReadEnvironment(); err != nil {
+		panic(err)
+	}
+
+	client, err := vaultapi.NewClient(cfg)
+	if err != nil {
+		panic(err)
+	}
+
+	return client
 }

@@ -2,9 +2,12 @@ package controller
 
 import (
 	"fmt"
-	"time"
 	"sync"
+	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
@@ -12,9 +15,11 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
+	"github.com/fukt/dweller/pkg/apis/dweller/v1alpha1"
 	"github.com/fukt/dweller/pkg/client/clientset/versioned"
 	"github.com/fukt/dweller/pkg/client/informers/externalversions"
 	"github.com/fukt/dweller/pkg/log"
+	"github.com/fukt/dweller/pkg/secret"
 )
 
 const maxRetries = 5
@@ -25,6 +30,10 @@ type Controller struct {
 	clientset kubernetes.Interface
 	queue     workqueue.RateLimitingInterface
 	informer  cache.SharedIndexInformer
+
+	// asm is a secret assembler that is used to create kubernetes secrets
+	// based on vault secret claim.
+	asm secret.Assembler
 }
 
 // Option is a function option for dweller controller.
@@ -38,7 +47,7 @@ func WithLogger(lg log.Logger) Option {
 }
 
 // New returns newly created dweller controller or nil on error.
-func New(k8sConfig *rest.Config, client kubernetes.Interface, options ...Option) (*Controller, error) {
+func New(k8sConfig *rest.Config, client kubernetes.Interface, asm secret.Assembler, options ...Option) (*Controller, error) {
 	defaultResync := 0 * time.Millisecond
 
 	clientset, err := versioned.NewForConfig(k8sConfig)
@@ -55,6 +64,7 @@ func New(k8sConfig *rest.Config, client kubernetes.Interface, options ...Option)
 		clientset: client,
 		informer:  informer,
 		queue:     queue,
+		asm:       asm,
 	}
 
 	for _, option := range options {
@@ -149,11 +159,90 @@ func (c *Controller) processNextItem() bool {
 
 // processItem is a main processing function
 func (c *Controller) processItem(key string) error {
-	c.logger.Infof("processing change to VaultSecretClaim %s", key)
+	c.logger.Debugf("process VaultSecretClaim %s", key)
 
-	_, _, err := c.informer.GetIndexer().GetByKey(key)
+	item, _, err := c.informer.GetIndexer().GetByKey(key)
 	if err != nil {
-		return fmt.Errorf("error fetching object with key %s from store: %v", key, err)
+		return fmt.Errorf("fetch object by key %s from store: %v", key, err)
 	}
+
+	if item == nil {
+		// The secret will be automatically garbage collected, so no need
+		// to delete it manually.
+		return nil
+	}
+
+	vsc, ok := item.(*v1alpha1.VaultSecretClaim)
+	if !ok {
+		return fmt.Errorf("item is not of type VaultSecretClaim but %T", item)
+	}
+
+	namespace := "default"
+	if vsc.Namespace != "" {
+		namespace = vsc.Namespace
+	}
+
+	// We need to fetch existing secretList and check if any is already owned by
+	// the vault secret claim. If no such secret exists, we need to create one.
+	// Otherwise, we need to update existing secret.
+
+	labelSelector := labels.SelectorFromSet(vsc.Spec.Secret.Metadata.GetLabels())
+	secretList, err := c.clientset.CoreV1().
+		Secrets(namespace).
+		List(metav1.ListOptions{
+			LabelSelector: labelSelector.String(),
+		})
+	if err != nil {
+		return err
+	}
+
+	var existingSecret *corev1.Secret
+	for _, sec := range secretList.Items {
+		if metav1.IsControlledBy(&sec, vsc) {
+			existingSecret = &sec
+			break
+		}
+	}
+
+	if existingSecret != nil {
+		return c.updateSecret(vsc, *existingSecret)
+	}
+
+	return c.createSecret(vsc, namespace)
+}
+
+func (c *Controller) createSecret(vsc *v1alpha1.VaultSecretClaim, namespace string) error {
+	sec, err := c.asm.Assemble(vsc)
+	if err != nil {
+		return err
+	}
+
+	_, err = c.clientset.CoreV1().Secrets(namespace).Create(&sec)
+	if err != nil {
+		return fmt.Errorf("create kubernetes secret: %v", err)
+	}
+
+	return nil
+}
+
+func (c *Controller) updateSecret(vsc *v1alpha1.VaultSecretClaim, secret corev1.Secret) error {
+	newSecret, err := c.asm.Assemble(vsc)
+	if err != nil {
+		return err
+	}
+
+	// In meta, we need to update only labels and annotations.
+	secret.ObjectMeta.Labels = newSecret.Labels
+	secret.ObjectMeta.Annotations = newSecret.Annotations
+
+	// In data, we update it as a whole.
+	secret.Data = nil
+	secret.StringData = newSecret.StringData
+
+	_, err = c.clientset.CoreV1().Secrets(secret.Namespace).Update(&secret)
+	if err != nil {
+		return fmt.Errorf("update kubernetes secret: %v", err)
+	}
+
 	return nil
 }

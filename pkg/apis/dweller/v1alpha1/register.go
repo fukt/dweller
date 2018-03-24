@@ -7,8 +7,21 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 )
 
+// SchemeKind is kind of vault secret claim.
+const SchemeKind = "VaultSecretClaim"
+
 // SchemeGroupVersion is group version used to register these objects
-var SchemeGroupVersion = schema.GroupVersion{Group: "dweller.io", Version: "v1alpha1"}
+var SchemeGroupVersion = schema.GroupVersion{
+	Group:   "dweller.io",
+	Version: "v1alpha1",
+}
+
+// SchemeGroupVersionKind is group version kind of dweller vault secret claim.
+var SchemeGroupVersionKind = schema.GroupVersionKind{
+	Group:   "dweller.io",
+	Version: "v1alpha1",
+	Kind:    SchemeKind,
+}
 
 // Kind takes an unqualified kind and returns back a Group qualified GroupKind
 func Kind(kind string) schema.GroupKind {
