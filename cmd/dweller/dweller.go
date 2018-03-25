@@ -21,7 +21,14 @@ func main() {
 		panic(err)
 	}
 
+	logLevel, err := logrus.ParseLevel(s.LogLevel)
+	if err != nil {
+		panic(err)
+	}
+
 	log := logrus.New()
+	log.SetLevel(logLevel)
+
 	config := mustConfig(s.KubeConfig)
 	kubeClient := mustInitKubernetesClient(config)
 	vaultClient := mustInitVaultClient()

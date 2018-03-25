@@ -2,15 +2,18 @@ package controller
 
 import (
 	"fmt"
-	"sync"
+	"reflect"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
@@ -18,18 +21,40 @@ import (
 	"github.com/fukt/dweller/pkg/apis/dweller/v1alpha1"
 	"github.com/fukt/dweller/pkg/client/clientset/versioned"
 	"github.com/fukt/dweller/pkg/client/informers/externalversions"
+	dwellerlisters "github.com/fukt/dweller/pkg/client/listers/dweller/v1alpha1"
 	"github.com/fukt/dweller/pkg/log"
 	"github.com/fukt/dweller/pkg/secret"
 )
 
-const maxRetries = 5
+const (
+	maxRetries = 5
+
+	// builtinResync is resync period for built-it kubernetes objects, in our
+	// case secrets.
+	builtinResync = time.Minute * 5
+
+	// customResync is resync period for custom resource definitions introduced
+	// by the controller, in our case vault secret claims.
+	customResync = time.Minute * 1
+)
 
 // Controller is a main dweller controller structure.
 type Controller struct {
-	logger    log.Logger
-	clientset kubernetes.Interface
-	queue     workqueue.RateLimitingInterface
-	informer  cache.SharedIndexInformer
+	builtinFactory informers.SharedInformerFactory
+	customFactory  externalversions.SharedInformerFactory
+
+	client    kubernetes.Interface
+	clientset versioned.Interface
+
+	logger log.Logger
+
+	queue workqueue.RateLimitingInterface
+
+	// secretLister can list/get secrets from the shared informer's store.
+	secretLister corelisters.SecretLister
+
+	// vscLister can list/get vault secret claims from the shared informer's store.
+	vscLister dwellerlisters.VaultSecretClaimLister
 
 	// asm is a secret assembler that is used to create kubernetes secrets
 	// based on vault secret claim.
@@ -48,83 +73,145 @@ func WithLogger(lg log.Logger) Option {
 
 // New returns newly created dweller controller or nil on error.
 func New(k8sConfig *rest.Config, client kubernetes.Interface, asm secret.Assembler, options ...Option) (*Controller, error) {
-	defaultResync := 0 * time.Millisecond
-
 	clientset, err := versioned.NewForConfig(k8sConfig)
 	if err != nil {
-		return nil, fmt.Errorf("error creating clientset: %v", err)
+		return nil, fmt.Errorf("error creating client: %v", err)
 	}
 
-	informerFactory := externalversions.NewSharedInformerFactory(clientset, defaultResync)
-	informer := informerFactory.Dweller().V1alpha1().VaultSecretClaims().Informer()
-	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-
-	result := &Controller{
+	ctrl := &Controller{
 		logger:    &log.Dummy{},
-		clientset: client,
-		informer:  informer,
-		queue:     queue,
+		client:    client,
+		clientset: clientset,
 		asm:       asm,
 	}
 
 	for _, option := range options {
-		option(result)
+		option(ctrl)
 	}
 
-	result.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			key, err := cache.MetaNamespaceKeyFunc(obj)
-			if err == nil {
-				result.queue.Add(key)
-			}
-		},
-		UpdateFunc: func(old, new interface{}) {
-			key, err := cache.MetaNamespaceKeyFunc(new)
-			if err == nil {
-				result.queue.Add(key)
-			}
-		},
-		DeleteFunc: func(obj interface{}) {
-			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
-			if err == nil {
-				result.queue.Add(key)
-			}
-		},
+	ctrl.queue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+
+	builtinFactory := informers.NewSharedInformerFactory(client, builtinResync)
+	customFactory := externalversions.NewSharedInformerFactory(clientset, customResync)
+
+	ctrl.builtinFactory = builtinFactory
+	ctrl.customFactory = customFactory
+
+	ctrl.secretLister = builtinFactory.Core().V1().Secrets().Lister()
+	ctrl.vscLister = customFactory.Dweller().V1alpha1().VaultSecretClaims().Lister()
+
+	vscInformer := customFactory.Dweller().V1alpha1().VaultSecretClaims().Informer()
+	vscInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    ctrl.addVaultSecretClaim,
+		UpdateFunc: ctrl.updateVaultSecretClaim,
+		DeleteFunc: ctrl.deleteVaultSecretClaim,
 	})
 
-	return result, nil
+	// TODO: we should also watch for secrets to:
+	// 1) enforce vsc definitions;
+	// 2) watch if conflicting secrets were deleted and we can safely create new.
+
+	// Hacky stuff.
+	utilruntime.ErrorHandlers[0] = func(err error) {
+		ctrl.logger.Errorf(err.Error())
+	}
+
+	return ctrl, nil
 }
 
-// Run starts the kubewatch controller
+// Run starts the controller.
 func (c *Controller) Run(stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
-
-	c.logger.Infof("starting dweller controller")
-
-	wg := sync.WaitGroup{}
-
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
-
-		c.informer.Run(stopCh)
+		<-stopCh
 		c.queue.ShutDown()
 	}()
 
-	if !cache.WaitForCacheSync(stopCh, c.HasSynced) {
-		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to populate"))
+	c.logger.Infof("Starting dweller controller")
+	defer c.logger.Infof("Shutting down dweller controller")
+
+	c.builtinFactory.Start(stopCh)
+	c.customFactory.Start(stopCh)
+
+	if err := c.syncInformersCache(stopCh); err != nil {
+		utilruntime.HandleError(err)
 		return
 	}
 
-	c.logger.Infof("dweller controller synced and ready")
+	c.logger.Infof("Dweller controller synced and ready")
 
 	wait.Until(c.runWorker, time.Second, stopCh)
-	wg.Wait()
 }
 
-// HasSynced is required for the cache.Controller interface.
-func (c *Controller) HasSynced() bool {
-	return c.informer.HasSynced()
+func (c *Controller) syncInformersCache(stopCh <-chan struct{}) error {
+	var syncedInformers map[reflect.Type]bool
+	var errs []error
+
+	// Sync all built-in informers that we are using in the controller.
+	syncedInformers = c.builtinFactory.WaitForCacheSync(stopCh)
+	for inf, synced := range syncedInformers {
+		if !synced {
+			errs = append(errs, fmt.Errorf("Couldn't sync cache for %v", inf))
+		} else {
+			c.logger.Debugf("Synced cache for %s", inf)
+		}
+	}
+
+	// Sync custom informers.
+	syncedInformers = c.customFactory.WaitForCacheSync(stopCh)
+	for inf, synced := range syncedInformers {
+		if !synced {
+			errs = append(errs, fmt.Errorf("couldn't sync cache for %v", inf))
+		} else {
+			c.logger.Debugf("Synced cache for %s", inf)
+		}
+	}
+
+	return utilerrors.NewAggregate(errs)
+}
+
+func (c *Controller) addVaultSecretClaim(obj interface{}) {
+	vsc := obj.(*v1alpha1.VaultSecretClaim)
+	c.logger.Infof("Adding VaultSecretClaim \"%s/%s\"", vsc.Namespace, vsc.Name)
+	c.enqueue(vsc)
+}
+
+func (c *Controller) updateVaultSecretClaim(old, new interface{}) {
+	oldVsc := old.(*v1alpha1.VaultSecretClaim)
+	newVsc := new.(*v1alpha1.VaultSecretClaim)
+	c.logger.Infof("Updating VaultSecretClaim \"%s/%s\"", oldVsc.Namespace, oldVsc.Name)
+	c.enqueue(newVsc)
+}
+
+func (c *Controller) deleteVaultSecretClaim(obj interface{}) {
+	vsc, ok := obj.(*v1alpha1.VaultSecretClaim)
+	if ok {
+		c.logger.Infof("Deleting VaultSecretClaim \"%s/%s\"", vsc.Namespace, vsc.Name)
+		c.enqueue(vsc)
+		return
+	}
+
+	tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+	if !ok {
+		utilruntime.HandleError(fmt.Errorf("Couldn't get object from tombstone %#v", obj))
+		return
+	}
+	vsc, ok = tombstone.Obj.(*v1alpha1.VaultSecretClaim)
+	if !ok {
+		utilruntime.HandleError(fmt.Errorf("Tombstone contained object that is not a VaultSecretClaim %#v", obj))
+		return
+	}
+}
+
+// enqueue adds vault secret claim to the queue.
+func (c *Controller) enqueue(vsc *v1alpha1.VaultSecretClaim) {
+	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(vsc)
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("Couldn't get key for object %#v: %v", vsc, err))
+		return
+	}
+
+	c.queue.Add(key)
 }
 
 func (c *Controller) runWorker() {
@@ -140,84 +227,103 @@ func (c *Controller) processNextItem() bool {
 	}
 	defer c.queue.Done(key)
 
-	err := c.processItem(key.(string))
-	if err == nil {
-		// No error, reset the ratelimit counters
-		c.queue.Forget(key)
-	} else if c.queue.NumRequeues(key) < maxRetries {
-		c.logger.Errorf("error processing %s (will retry): %v", key, err)
-		c.queue.AddRateLimited(key)
-	} else {
-		// err != nil and too many retries
-		c.logger.Errorf("error processing %s (giving up): %v", key, err)
-		c.queue.Forget(key)
-		utilruntime.HandleError(err)
-	}
+	err := c.syncVaultSecretClaim(key.(string))
+	c.handleProcessingError(err, key)
 
 	return true
 }
 
-// processItem is a main processing function
-func (c *Controller) processItem(key string) error {
-	c.logger.Debugf("process VaultSecretClaim %s", key)
-
-	item, _, err := c.informer.GetIndexer().GetByKey(key)
-	if err != nil {
-		return fmt.Errorf("fetch object by key %s from store: %v", key, err)
+func (c *Controller) handleProcessingError(err error, key interface{}) {
+	if err == nil {
+		// No error, reset the ratelimit counters
+		c.queue.Forget(key)
+		return
 	}
 
-	if item == nil {
-		// The secret will be automatically garbage collected, so no need
-		// to delete it manually.
-		return nil
+	if c.queue.NumRequeues(key) < maxRetries {
+		utilruntime.HandleError(fmt.Errorf("Error processing %s (will retry): %v", key, err))
+		c.queue.AddRateLimited(key)
+		return
 	}
 
-	vsc, ok := item.(*v1alpha1.VaultSecretClaim)
-	if !ok {
-		return fmt.Errorf("item is not of type VaultSecretClaim but %T", item)
-	}
+	// too many retries
+	utilruntime.HandleError(fmt.Errorf("Error processing %s (giving up): %v", key, err))
+	c.queue.Forget(key)
+}
 
-	namespace := "default"
-	if vsc.Namespace != "" {
-		namespace = vsc.Namespace
-	}
+// syncVaultSecretClaim will sync the vault secret claim with the given key.
+// This function is not meant to be invoked concurrently with the same key.
+func (c *Controller) syncVaultSecretClaim(key string) error {
+	startTime := time.Now()
+	c.logger.Infof("Started syncing VaultSecretClaim %q (%v)", key, startTime.Format(time.RFC3339Nano))
+	defer func() {
+		c.logger.Infof("Finished syncing VaultSecretClaim %q (%v)", key, time.Since(startTime))
+	}()
 
-	// We need to fetch existing secretList and check if any is already owned by
-	// the vault secret claim. If no such secret exists, we need to create one.
-	// Otherwise, we need to update existing secret.
-
-	labelSelector := labels.SelectorFromSet(vsc.Spec.Secret.Metadata.GetLabels())
-	secretList, err := c.clientset.CoreV1().
-		Secrets(namespace).
-		List(metav1.ListOptions{
-			LabelSelector: labelSelector.String(),
-		})
+	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		return err
 	}
 
-	var existingSecret *corev1.Secret
-	for _, sec := range secretList.Items {
-		if metav1.IsControlledBy(&sec, vsc) {
-			existingSecret = &sec
-			break
+	c.logger.Debugf("Looking for VaultSecretClaim \"%s/%s\"", namespace, name)
+
+	vaultSecretClaim, err := c.vscLister.VaultSecretClaims(namespace).Get(name)
+	if apierrors.IsNotFound(err) {
+		// VaultSecretClaim's child secret will be automatically garbage
+		// collected, so no need to delete it manually.
+		c.logger.Infof("VaultSecretClaim %v has been deleted", key)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	// Deep-copy otherwise we are mutating our cache.
+	vsc := vaultSecretClaim.DeepCopy()
+
+	c.logger.Debugf("Looking for Secret \"%s/%s\"", vsc.Namespace, vsc.Name)
+	relatedSecret, err := c.secretLister.Secrets(vsc.Namespace).Get(vsc.Name)
+	if apierrors.IsNotFound(err) {
+		c.logger.Debugf("Secret \"%s/%s\" was not found - VaultSecretClaim will create one", vsc.Namespace, vsc.Name)
+		if err := c.createSecret(vsc); err != nil {
+			return err
 		}
+		c.logger.Infof("Secret for VaultSecretClaim %v has been created", key)
+		return nil
 	}
 
-	if existingSecret != nil {
-		return c.updateSecret(vsc, *existingSecret)
+	if err != nil {
+		return err
 	}
 
-	return c.createSecret(vsc, namespace)
+	// Deep-copy otherwise we are mutating our cache.
+	sec := relatedSecret.DeepCopy()
+
+	if !metav1.IsControlledBy(sec, vsc) {
+		err := fmt.Errorf("Conflict: found secret \"%s/%s\" that is not owned by vault secret claim. This must be resolved manually.", sec.Namespace, sec.Name)
+		utilruntime.HandleError(err)
+		return nil // Don't need to retry.
+	}
+
+	// TODO: It might be worthwhile to revisit creation/updating
+	// logic to handle all the fields properly.
+
+	// Found a secret, and it is controlled by vault secret claim.
+	// Just sync it.
+	if err := c.updateSecret(vsc, sec); err != nil {
+		return err
+	}
+	c.logger.Infof("Secret for VaultSecretClaim %v has been updated", key)
+	return nil
 }
 
-func (c *Controller) createSecret(vsc *v1alpha1.VaultSecretClaim, namespace string) error {
+func (c *Controller) createSecret(vsc *v1alpha1.VaultSecretClaim) error {
 	sec, err := c.asm.Assemble(vsc)
 	if err != nil {
 		return err
 	}
 
-	_, err = c.clientset.CoreV1().Secrets(namespace).Create(&sec)
+	_, err = c.client.CoreV1().Secrets(vsc.Namespace).Create(&sec)
 	if err != nil {
 		return fmt.Errorf("create kubernetes secret: %v", err)
 	}
@@ -225,7 +331,11 @@ func (c *Controller) createSecret(vsc *v1alpha1.VaultSecretClaim, namespace stri
 	return nil
 }
 
-func (c *Controller) updateSecret(vsc *v1alpha1.VaultSecretClaim, secret corev1.Secret) error {
+func (c *Controller) updateSecret(vsc *v1alpha1.VaultSecretClaim, secret *corev1.Secret) error {
+	// TODO: compute and compare hashes to not to do worthless updates if vault
+	// secret claim is not actually changed (for example in case of resync).
+	// Implement something like "pod-template-hash" in ReplicaSet.
+
 	newSecret, err := c.asm.Assemble(vsc)
 	if err != nil {
 		return err
@@ -239,7 +349,7 @@ func (c *Controller) updateSecret(vsc *v1alpha1.VaultSecretClaim, secret corev1.
 	secret.Data = nil
 	secret.StringData = newSecret.StringData
 
-	_, err = c.clientset.CoreV1().Secrets(secret.Namespace).Update(&secret)
+	_, err = c.client.CoreV1().Secrets(secret.Namespace).Update(secret)
 	if err != nil {
 		return fmt.Errorf("update kubernetes secret: %v", err)
 	}
