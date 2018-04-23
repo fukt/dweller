@@ -17,6 +17,9 @@ type Specification struct {
 
 	// ValutToken defines the Vault token that dweller is authenticating with.
 	ValutToken string `envconfig:"VAULT_TOKEN" required:"true"`
+
+	// LogLevel defines log level for the logger. By default level is "info".
+	LogLevel string `envconfig:"LOG_LEVEL" default:"info"`
 }
 
 // SpecificationFromEnvironment returns specification loaded from environment

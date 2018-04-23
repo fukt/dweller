@@ -39,11 +39,16 @@ func (asm *SecretAssembler) Assemble(vsc *v1alpha1.VaultSecretClaim) (corev1.Sec
 }
 
 func (asm *SecretAssembler) assembleMeta(vsc *v1alpha1.VaultSecretClaim) metav1.ObjectMeta {
-	meta := vsc.Spec.Secret.Metadata
+	meta := metav1.ObjectMeta{}
 
-	// Force name to be generated after parent name.
-	meta.Name = ""
-	meta.GenerateName = vsc.ObjectMeta.Name + "-"
+	// Force name to be equal to vsc name.
+	meta.Name = vsc.Name
+	// Force the same namespace.
+	meta.Namespace = vsc.Namespace
+
+	// Only labels and annotations are copied from spec.secret.metadata.
+	meta.Labels = vsc.Spec.Secret.Metadata.Labels
+	meta.Annotations = vsc.Spec.Secret.Metadata.Annotations
 
 	// Set ownership to benefit from garbage collection.
 	// See: https://kubernetes.io/docs/concepts/workloads/controllers/garbage-collection/
