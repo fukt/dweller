@@ -17,7 +17,9 @@ type VaultSecretClaim struct {
 
 // VaultSecretClaimSpec is a specification for vault secret claim.
 type VaultSecretClaimSpec struct {
-	Secret SecretTemplate `json:"secret"`
+	ServiceAccountName string         `json:"serviceAccountName,omitempty"`
+	VaultRole          string         `json:"vaultRole"`
+	Secret             SecretTemplate `json:"secret"`
 }
 
 // SecretTemplate is a template for kubernetes secret created by vault secret

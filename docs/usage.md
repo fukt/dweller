@@ -1,11 +1,14 @@
-# dweller
+# Usage
 
-Dweller is a k8s controller that provides Vault secrets as native kubernetes secrets.
-
-This project currently is under heavy development. See [docs/develop](docs/develop)
-if you want to try Dweller or to support its development by contributing.
+TODO: delete this doc
 
 ## Intro
+
+Let's imagine we are modeling **manufactory**, and currently, we are creating an
+application named **workbench**. We need **fabric** for a work, and it is stored
+in a **warehouse**, which is implemented by PostgreSQL. Obviously we don't want anyone
+to just take our fabric, so to access the warehouse we use a key, in the form of 
+PostgreSQL credentials. 
 
 Let's imagine we are modeling **manufactory**. The workload is split among
 many **workbenches**. We need **fabric** for a work, and it is stored
@@ -31,7 +34,7 @@ Now, let's translate this story to to our software:
 - safe is Hashicorp Vault
 - key keeper is Dweller
 
-## How it works
+## Usage
 
 *This example assumes Kubernetes running and Vault integration set up.*
 
@@ -100,3 +103,4 @@ You now have a secret named **warehouse-key** in **manufactory**
 namespace with PostgreSQL credentials taken from Vault and brought by fellow **Dweller**:
 
     kubectl get secret -o yaml warehouse-key
+

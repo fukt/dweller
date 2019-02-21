@@ -50,6 +50,9 @@ type Controller struct {
 
 	queue workqueue.RateLimitingInterface
 
+	// saLister can list/get service accounts the shared informer's store.
+	saLister corelisters.ServiceAccountLister
+
 	// secretLister can list/get secrets from the shared informer's store.
 	secretLister corelisters.SecretLister
 
@@ -97,6 +100,7 @@ func New(k8sConfig *rest.Config, client kubernetes.Interface, asm secret.Assembl
 	ctrl.builtinFactory = builtinFactory
 	ctrl.customFactory = customFactory
 
+	ctrl.saLister = builtinFactory.Core().V1().ServiceAccounts().Lister()
 	ctrl.secretLister = builtinFactory.Core().V1().Secrets().Lister()
 	ctrl.vscLister = customFactory.Dweller().V1alpha1().VaultSecretClaims().Lister()
 
@@ -281,11 +285,38 @@ func (c *Controller) syncVaultSecretClaim(key string) error {
 	// Deep-copy otherwise we are mutating our cache.
 	vsc := vaultSecretClaim.DeepCopy()
 
+	// TODO: check if spec.serviceAccountName exists.
+	// TODO: check if spec.vaultRole exists.
+
+	relatedServiceAccount, err := c.saLister.ServiceAccounts(vsc.Namespace).Get(vsc.Spec.ServiceAccountName)
+	if err != nil {
+		return err
+	}
+	if len(relatedServiceAccount.Secrets) > 1 {
+		return fmt.Errorf("service account \"%s/%s\" has no secrets associated with it", relatedServiceAccount.Namespace, relatedServiceAccount.Name)
+	}
+
+	secretName := relatedServiceAccount.Secrets[0].Name
+	saSecret, err := c.secretLister.Secrets(vsc.Namespace).Get(secretName)
+	if err != nil {
+		return err
+	}
+
+	token := string(saSecret.Data["token"])
+	if token == "" {
+		return fmt.Errorf("token not found in service account secret \"%s/%s\"", saSecret.Namespace, saSecret.Name)
+	}
+
+	creds := &secret.Credentials{
+		Token: token,
+		Role:  vsc.Spec.VaultRole,
+	}
+
 	c.logger.Debugf("Looking for Secret \"%s/%s\"", vsc.Namespace, vsc.Name)
 	relatedSecret, err := c.secretLister.Secrets(vsc.Namespace).Get(vsc.Name)
 	if apierrors.IsNotFound(err) {
 		c.logger.Debugf("Secret \"%s/%s\" was not found - VaultSecretClaim will create one", vsc.Namespace, vsc.Name)
-		if err := c.createSecret(vsc); err != nil {
+		if err := c.createSecret(vsc, creds); err != nil {
 			return err
 		}
 		c.logger.Infof("Secret for VaultSecretClaim %v has been created", key)
@@ -310,15 +341,15 @@ func (c *Controller) syncVaultSecretClaim(key string) error {
 
 	// Found a secret, and it is controlled by vault secret claim.
 	// Just sync it.
-	if err := c.updateSecret(vsc, sec); err != nil {
+	if err := c.updateSecret(vsc, sec, creds); err != nil {
 		return err
 	}
 	c.logger.Infof("Secret for VaultSecretClaim %v has been updated", key)
 	return nil
 }
 
-func (c *Controller) createSecret(vsc *v1alpha1.VaultSecretClaim) error {
-	sec, err := c.asm.Assemble(vsc)
+func (c *Controller) createSecret(vsc *v1alpha1.VaultSecretClaim, creds *secret.Credentials) error {
+	sec, err := c.asm.Assemble(vsc, creds)
 	if err != nil {
 		return err
 	}
@@ -331,12 +362,12 @@ func (c *Controller) createSecret(vsc *v1alpha1.VaultSecretClaim) error {
 	return nil
 }
 
-func (c *Controller) updateSecret(vsc *v1alpha1.VaultSecretClaim, secret *corev1.Secret) error {
+func (c *Controller) updateSecret(vsc *v1alpha1.VaultSecretClaim, secret *corev1.Secret, creds *secret.Credentials) error {
 	// TODO: compute and compare hashes to not to do worthless updates if vault
 	// secret claim is not actually changed (for example in case of resync).
 	// Implement something like "pod-template-hash" in ReplicaSet.
 
-	newSecret, err := c.asm.Assemble(vsc)
+	newSecret, err := c.asm.Assemble(vsc, creds)
 	if err != nil {
 		return err
 	}

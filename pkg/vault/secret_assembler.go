@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/fukt/dweller/pkg/apis/dweller/v1alpha1"
+	"github.com/fukt/dweller/pkg/secret"
 )
 
 // SecretAssembler assembles kubernetes secrets using Vault as a secret provider.
@@ -15,14 +16,9 @@ type SecretAssembler struct {
 	vault *vault.Client
 }
 
-// NewSecretAssembler returns new Vault secret assembler.
-func NewSecretAssembler(vault *vault.Client) *SecretAssembler {
-	return &SecretAssembler{vault: vault}
-}
-
 // Assemble assembles a kubernetes secret from the vault secret claim fetching
 // secret values from Vault.
-func (asm *SecretAssembler) Assemble(vsc *v1alpha1.VaultSecretClaim) (corev1.Secret, error) {
+func (asm *SecretAssembler) Assemble(vsc *v1alpha1.VaultSecretClaim, creds *secret.Credentials) (corev1.Secret, error) {
 	meta := asm.assembleMeta(vsc)
 
 	secret := corev1.Secret{
@@ -31,7 +27,7 @@ func (asm *SecretAssembler) Assemble(vsc *v1alpha1.VaultSecretClaim) (corev1.Sec
 		StringData: make(map[string]string),
 	}
 
-	if err := asm.fetchVaultSecrets(vsc.Spec.Secret.Data, &secret); err != nil {
+	if err := asm.fetchVaultSecrets(vsc.Spec.Secret.Data, &secret, creds); err != nil {
 		return secret, err
 	}
 
@@ -58,11 +54,20 @@ func (asm *SecretAssembler) assembleMeta(vsc *v1alpha1.VaultSecretClaim) metav1.
 	return meta
 }
 
-func (asm *SecretAssembler) fetchVaultSecrets(items []v1alpha1.DataItem, secret *corev1.Secret) error {
+func (asm *SecretAssembler) fetchVaultSecrets(items []v1alpha1.DataItem, secret *corev1.Secret, creds *secret.Credentials) error {
+	vc, err := asm.login(creds)
+	if err != nil {
+		return err
+	}
+
 	for _, item := range items {
-		vaultSecret, err := asm.vault.Logical().Read(item.VaultPath)
+		vaultSecret, err := vc.Logical().Read(item.VaultPath)
 		if err != nil {
 			return err
+		}
+
+		if vaultSecret == nil {
+			return fmt.Errorf("no secret found by path %q", item.VaultPath)
 		}
 
 		var value string
@@ -78,4 +83,35 @@ func (asm *SecretAssembler) fetchVaultSecrets(items []v1alpha1.DataItem, secret 
 	}
 
 	return nil
+}
+
+func (asm *SecretAssembler) login(creds *secret.Credentials) (*vault.Client, error) {
+	if creds == nil {
+		// Just return the client as-is.
+		return asm.vault.Clone()
+	}
+
+	res, err := asm.vault.Logical().
+		Write("auth/kubernetes/login", map[string]interface{}{
+			"role": creds.Role,
+			"jwt":  creds.Token,
+		})
+	if err != nil {
+		return nil, err
+	}
+	if res.Auth == nil {
+		return nil, fmt.Errorf("no authentication information attached to vault res")
+	}
+
+	vc, err := asm.vault.Clone()
+	if err != nil {
+		return nil, err
+	}
+	vc.SetToken(res.Auth.ClientToken)
+	return vc, nil
+}
+
+// NewSecretAssembler returns new Vault secret assembler.
+func NewSecretAssembler(vault *vault.Client) *SecretAssembler {
+	return &SecretAssembler{vault: vault}
 }

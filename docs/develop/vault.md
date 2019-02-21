@@ -23,9 +23,39 @@ Export Root Token to use Vault CLI:
 
     export VAULT_TOKEN=<Root Token>
 
+Enable [Vault auth plugin for Kubernetes](https://github.com/hashicorp/vault-plugin-auth-kubernetes):
+
+*Note that this example is given for minikube but can be adapted for other cluster*
+
+Enable Vault auth plugin for Kubernetes:
+
+    vault auth enable kubernetes
+
+    vault write auth/kubernetes/config \
+        kubernetes_host=https://192.168.99.100:8443 \
+        kubernetes_ca_cert=@~/.minikube/ca.crt
+
+Now your Vault is ready to work with **dweller**.
+
+###############
+
+Create a role, we use PostgreSQL user role as an example:
+
+    vault write auth/kubernetes/role/postgres_user \
+        bound_service_account_names=cooker \
+        bound_service_account_namespaces=kitchen \
+        policies=postgres-reader
+
+
 Add some secret for development purposes:
 
-    vault write secret/postgres username=johndoe password=123123
+    vault write secret/postgres \
+        username=johndoe \
+        password=123123
+    
+    cat <<EOF | vault policy write postgres-reader -
+    path "secret/postgres" { policy = "read" }
+    EOF
 
 Check it:
 
@@ -36,17 +66,26 @@ example, the following VaultSecretClaim resource should work with the Vault secr
 created above:
 
     cat <<EOF | kubectl create -f -
+    apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: cooker
+    EOF
+
+    cat <<EOF | kubectl create -f -
     apiVersion: dweller.io/v1alpha1
     kind: VaultSecretClaim
     metadata:
-      name: test
+      name: cooker
       labels:
-        app: test
+        app: cooker
     spec:
+      serviceAccountName: cooker
+      vaultRole: 
       secret:
         metadata:
           labels:
-            app: test
+            app: cooker
         data:
         - key: POSTGRES_PASSWORD
           vaultPath: secret/postgres
@@ -56,3 +95,22 @@ created above:
 After that you can see Dweller created a kubernetes secret from the claim:
 
     kubectl get secret -l app=test
+
+## Vault kubernetes integration
+
+*Examples below are given for minikube but can be adapted for other cluster*
+
+Enable Vault auth plugin for Kubernetes:
+
+    vault auth enable kubernetes
+
+    vault write auth/kubernetes/config \
+        kubernetes_host=https://192.168.99.100:8443 \
+        kubernetes_ca_cert=@~/.minikube/ca.crt
+
+Create a role, we use PostgreSQL user role as an example:
+
+    vault write auth/kubernetes/role/postgres_user \
+        bound_service_account_names=cooker \
+        bound_service_account_namespaces=kitchen \
+        policies=postgres-reader
